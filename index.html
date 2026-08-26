@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Matches/Differs Bot V1</title>
+<style>
+body{font-family:Arial,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:18px}
+.card{max-width:900px;margin:auto;background:#111827;border-radius:16px;padding:18px;box-shadow:0 8px 30px #0005}
+h1{margin-top:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+label{font-size:13px;color:#9ca3af}input,select,button{width:100%;box-sizing:border-box;padding:11px;border-radius:9px;border:1px solid #374151;background:#1f2937;color:#fff;margin-top:5px}
+button{cursor:pointer;font-weight:bold}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.big{font-size:46px;font-weight:800;text-align:center;padding:18px}.confidence{text-align:center;font-size:22px}
+.status{padding:10px;border-radius:9px;background:#1f2937;margin:12px 0}.green{color:#4ade80}.red{color:#f87171}.muted{color:#9ca3af}
+table{width:100%;border-collapse:collapse;margin-top:12px}td,th{padding:7px;border-bottom:1px solid #263244;text-align:left}
+.small{font-size:12px;color:#9ca3af;line-height:1.45}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Matches/Differs Bot — V1</h1>
+<p class="small">V1 reproduces the visible workflow from the supplied video: manual index selection → live digit analysis → predicted digit → confidence → entry countdown → optional demo trading. The prediction formula is an inferred frequency/recency model, not the original bot's hidden algorithm.</p>
+
+<div class="grid">
+  <div><label>Deriv App ID</label><input id="appId" value="1089"></div>
+  <div><label>Index</label>
+    <select id="symbol">
+      <option value="R_10">Volatility 10 Index</option>
+      <option value="R_25">Volatility 25 Index</option>
+      <option value="R_50">Volatility 50 Index</option>
+      <option value="R_75">Volatility 75 Index</option>
+      <option value="R_100">Volatility 100 Index</option>
+      <option value="1HZ10V">Volatility 10 (1s)</option>
+      <option value="1HZ25V">Volatility 25 (1s)</option>
+      <option value="1HZ50V">Volatility 50 (1s)</option>
+      <option value="1HZ75V">Volatility 75 (1s)</option>
+      <option value="1HZ100V">Volatility 100 (1s)</option>
+    </select>
+  </div>
+  <div><label>Lookback ticks</label><input id="lookback" type="number" value="100" min="20" max="500"></div>
+  <div><label>Stake (not fixed)</label><input id="stake" type="number" value="1" min="0.35" step="0.01"></div>
+  <div><label>Minimum confidence</label><input id="minConf" type="number" value="15" min="0" max="100"></div>
+  <div><label>Entry countdown (seconds)</label><input id="countdown" type="number" value="1" min="0" max="10"></div>
+</div>
+
+<div class="row">
+  <button id="connect">CONNECT / ANALYZE</button>
+  <button id="stop">STOP</button>
+</div>
+
+<div class="status" id="status">Disconnected.</div>
+<div class="big" id="digit">—</div>
+<div class="confidence" id="confidence">Confidence: —</div>
+<div class="status" id="signal">Signal: waiting for enough ticks…</div>
+
+<div class="grid">
+  <div><label>Last digit</label><div id="last">—</div></div>
+  <div><label>Ticks collected</label><div id="count">0</div></div>
+  <div><label>Wins</label><div id="wins" class="green">0</div></div>
+  <div><label>Losses</label><div id="losses" class="red">0</div></div>
+</div>
+
+<h3>Digit distribution</h3>
+<table><thead><tr><th>Digit</th><th>Count</th><th>Weighted score</th></tr></thead>
+<tbody id="dist"></tbody></table>
+
+<h3>Optional authenticated trading</h3>
+<div class="small">
+For safety, V1 does not place a real-money contract automatically. Once the prediction engine is validated on demo ticks, the next version can add authenticated Deriv demo trading and then real-account trading. Do not paste an API token into public/shared code.
+</div>
+</div>
+
+<script>
+let ws=null, ticks=[], running=false, timer=null, wins=0, losses=0;
+
+const $=id=>document.getElementById(id);
+function setStatus(x){$("status").textContent=x}
+function digitFromQuote(q){
+  const s=String(q);
+  const m=s.match(/(\d)$/);
+  return m ? Number(m[1]) : null;
+}
+function analyze(){
+  const n=Math.min(Number($("lookback").value)||100, ticks.length);
+  const a=ticks.slice(-n);
+  if(a.length<20) return;
+  const scores=Array(10).fill(0), counts=Array(10).fill(0);
+  // Recency-weighted frequency: newer ticks receive more weight.
+  a.forEach((d,i)=>{
+    counts[d]++;
+    const w=1 + i/a.length*2;
+    scores[d]+=w;
+  });
+  let best=0;
+  for(let d=1;d<10;d++) if(scores[d]>scores[best]) best=d;
+  const total=scores.reduce((x,y)=>x+y,0);
+  const conf=total ? scores[best]/total*100 : 0;
+  $("digit").textContent=best;
+  $("confidence").textContent="Confidence: "+conf.toFixed(1)+"%";
+  $("count").textContent=ticks.length;
+  $("last").textContent=ticks[ticks.length-1];
+  $("signal").innerHTML = conf >= Number($("minConf").value)
+    ? '<span class="green">MATCH candidate: digit '+best+' — Entry in '+$("countdown").value+'s</span>'
+    : '<span class="muted">WAIT — confidence '+conf.toFixed(1)+'% is below minimum.</span>';
+  $("dist").innerHTML=scores.map((s,d)=>`<tr><td>${d}</td><td>${counts[d]}</td><td>${s.toFixed(2)}</td></tr>`).join("");
+}
+function connect(){
+  stop();
+  const appId=$("appId").value.trim();
+  const symbol=$("symbol").value;
+  if(!appId){setStatus("Enter a Deriv App ID.");return}
+  const url=`wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(appId)}`;
+  ws=new WebSocket(url);
+  ws.onopen=()=>{
+    running=true;ticks=[];
+    setStatus("Connected. Loading tick history…");
+    ws.send(JSON.stringify({ticks_history:symbol,end:"latest",count:100,style:"ticks",subscribe:1}));
+  };
+  ws.onmessage=e=>{
+    let d; try{d=JSON.parse(e.data)}catch{return}
+    if(d.error){setStatus("Deriv error: "+d.error.message);return}
+    if(d.msg_type==="history" && d.history?.prices){
+      d.history.prices.forEach(p=>{const x=digitFromQuote(p);if(x!==null)ticks.push(x)});
+      analyze();
+      setStatus("Live tick stream active on "+symbol);
+    }
+    if(d.msg_type==="tick" && d.tick?.quote!=null){
+      const x=digitFromQuote(d.tick.quote);
+      if(x!==null){ticks.push(x); if(ticks.length>500)ticks.shift(); analyze();}
+    }
+  };
+  ws.onerror=()=>setStatus("WebSocket error. Check App ID/connection.");
+  ws.onclose=()=>{running=false;setStatus("Disconnected.")};
+}
+function stop(){
+  if(ws){try{ws.close()}catch{}}
+  ws=null;running=false;
+  if(timer)clearTimeout(timer);
+  setStatus("Stopped.");
+}
+$("connect").onclick=connect;
+$("stop").onclick=stop;
+$("symbol").onchange=()=>{if(running)connect()};
+</script>
+</body>
+</html>
